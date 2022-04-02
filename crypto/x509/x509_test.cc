@@ -2719,9 +2719,20 @@ TEST(X509Test, InvalidExtensions) {
             .c_str());
     ASSERT_TRUE(invalid_leaf);
 
+    bssl::UniquePtr<X509> trailing_leaf = CertFromPEM(
+        GetTestData((std::string("crypto/x509/test/trailing_data_leaf_") +
+                     ext + ".pem")
+                        .c_str())
+            .c_str());
+    ASSERT_TRUE(trailing_leaf);
+
     EXPECT_EQ(
         X509_V_ERR_INVALID_EXTENSION,
         Verify(invalid_leaf.get(), {root.get()}, {intermediate.get()}, {}));
+
+    EXPECT_EQ(
+        X509_V_ERR_INVALID_EXTENSION,
+        Verify(trailing_leaf.get(), {root.get()}, {intermediate.get()}, {}));
 
     // If the invalid extension is on an intermediate or root,
     // |X509_verify_cert| notices by way of being unable to build a path to
@@ -3451,4 +3462,452 @@ TEST(X509Test, TrustedFirst) {
              {}, /*flags=*/0, [&](X509_VERIFY_PARAM *param) {
                X509_VERIFY_PARAM_clear_flags(param, X509_V_FLAG_TRUSTED_FIRST);
              }));
+}
+
+// kConstructedBitString is an X.509 certificate where the signature is encoded
+// as a BER constructed BIT STRING. Note that, while OpenSSL's parser accepts
+// this input, it interprets the value incorrectly.
+static const char kConstructedBitString[] = R"(
+-----BEGIN CERTIFICATE-----
+MIIBJTCBxqADAgECAgIE0jAKBggqhkjOPQQDAjAPMQ0wCwYDVQQDEwRUZXN0MCAX
+DTAwMDEwMTAwMDAwMFoYDzIxMDAwMTAxMDAwMDAwWjAPMQ0wCwYDVQQDEwRUZXN0
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE5itp4r9ln5e+Lx4NlIpM1Zdrt6ke
+DUb73ampHp3culoB59aXqAoY+cPEox5W4nyDSNsWGhz1HX7xlC1Lz3IiwaMQMA4w
+DAYDVR0TBAUwAwEB/zAKBggqhkjOPQQDAiNOAyQAMEYCIQCp0iIX5s30KXjihR4g
+KnJpd3seqGlVRqCVgrD0KGYDJgA1QAIhAKkx0vR82QU0NtHDD11KX/LuQF2T+2nX
+oeKp5LKAbMVi
+-----END CERTIFICATE-----
+)";
+
+// kConstructedOctetString is an X.509 certificate where an extension is encoded
+// as a BER constructed OCTET STRING.
+static const char kConstructedOctetString[] = R"(
+-----BEGIN CERTIFICATE-----
+MIIBJDCByqADAgECAgIE0jAKBggqhkjOPQQDAjAPMQ0wCwYDVQQDEwRUZXN0MCAX
+DTAwMDEwMTAwMDAwMFoYDzIxMDAwMTAxMDAwMDAwWjAPMQ0wCwYDVQQDEwRUZXN0
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE5itp4r9ln5e+Lx4NlIpM1Zdrt6ke
+DUb73ampHp3culoB59aXqAoY+cPEox5W4nyDSNsWGhz1HX7xlC1Lz3IiwaMUMBIw
+EAYDVR0TJAkEAzADAQQCAf8wCgYIKoZIzj0EAwIDSQAwRgIhAKnSIhfmzfQpeOKF
+HiAqcml3ex6oaVVGoJWCsPQoZjVAAiEAqTHS9HzZBTQ20cMPXUpf8u5AXZP7adeh
+4qnksoBsxWI=
+-----END CERTIFICATE-----
+)";
+
+// kIndefiniteLength is an X.509 certificate where the outermost SEQUENCE uses
+// BER indefinite-length encoding.
+static const char kIndefiniteLength[] = R"(
+-----BEGIN CERTIFICATE-----
+MIAwgcagAwIBAgICBNIwCgYIKoZIzj0EAwIwDzENMAsGA1UEAxMEVGVzdDAgFw0w
+MDAxMDEwMDAwMDBaGA8yMTAwMDEwMTAwMDAwMFowDzENMAsGA1UEAxMEVGVzdDBZ
+MBMGByqGSM49AgEGCCqGSM49AwEHA0IABOYraeK/ZZ+Xvi8eDZSKTNWXa7epHg1G
++92pqR6d3LpaAefWl6gKGPnDxKMeVuJ8g0jbFhoc9R1+8ZQtS89yIsGjEDAOMAwG
+A1UdEwQFMAMBAf8wCgYIKoZIzj0EAwIDSQAwRgIhAKnSIhfmzfQpeOKFHiAqcml3
+ex6oaVVGoJWCsPQoZjVAAiEAqTHS9HzZBTQ20cMPXUpf8u5AXZP7adeh4qnksoBs
+xWIAAA==
+-----END CERTIFICATE-----
+)";
+
+// kNonZeroPadding is an X.09 certificate where the BIT STRING signature field
+// has non-zero padding values.
+static const char kNonZeroPadding[] = R"(
+-----BEGIN CERTIFICATE-----
+MIIB0DCCAXagAwIBAgIJANlMBNpJfb/rMAkGByqGSM49BAEwRTELMAkGA1UEBhMC
+QVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoMGEludGVybmV0IFdpZGdp
+dHMgUHR5IEx0ZDAeFw0xNDA0MjMyMzIxNTdaFw0xNDA1MjMyMzIxNTdaMEUxCzAJ
+BgNVBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5l
+dCBXaWRnaXRzIFB0eSBMdGQwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATmK2ni
+v2Wfl74vHg2UikzVl2u3qR4NRvvdqakendy6WgHn1peoChj5w8SjHlbifINI2xYa
+HPUdfvGULUvPciLBo1AwTjAdBgNVHQ4EFgQUq4TSrKuV8IJOFngHVVdf5CaNgtEw
+HwYDVR0jBBgwFoAUq4TSrKuV8IJOFngHVVdf5CaNgtEwDAYDVR0TBAUwAwEB/zAJ
+BgcqhkjOPQQBA0kBMEUCIQDyoDVeUTo2w4J5m+4nUIWOcAZ0lVfSKXQA9L4Vh13E
+BwIgfB55FGohg/B6dGh5XxSZmmi08cueFV7mHzJSYV51yRQB
+-----END CERTIFICATE-----
+)";
+
+// kHighTagNumber is an X.509 certificate where the outermost SEQUENCE tag uses
+// high tag number form.
+static const char kHighTagNumber[] = R"(
+-----BEGIN CERTIFICATE-----
+PxCCASAwgcagAwIBAgICBNIwCgYIKoZIzj0EAwIwDzENMAsGA1UEAxMEVGVzdDAg
+Fw0wMDAxMDEwMDAwMDBaGA8yMTAwMDEwMTAwMDAwMFowDzENMAsGA1UEAxMEVGVz
+dDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABOYraeK/ZZ+Xvi8eDZSKTNWXa7ep
+Hg1G+92pqR6d3LpaAefWl6gKGPnDxKMeVuJ8g0jbFhoc9R1+8ZQtS89yIsGjEDAO
+MAwGA1UdEwQFMAMBAf8wCgYIKoZIzj0EAwIDSQAwRgIhAKnSIhfmzfQpeOKFHiAq
+cml3ex6oaVVGoJWCsPQoZjVAAiEAqTHS9HzZBTQ20cMPXUpf8u5AXZP7adeh4qnk
+soBsxWI=
+-----END CERTIFICATE-----
+)";
+
+TEST(X509Test, BER) {
+  // Constructed strings are forbidden in DER.
+  EXPECT_FALSE(CertFromPEM(kConstructedBitString));
+  EXPECT_FALSE(CertFromPEM(kConstructedOctetString));
+  // Indefinite lengths are forbidden in DER.
+  EXPECT_FALSE(CertFromPEM(kIndefiniteLength));
+  // Padding bits in BIT STRINGs must be zero in BER.
+  EXPECT_FALSE(CertFromPEM(kNonZeroPadding));
+  // Tags must be minimal in both BER and DER, though many BER decoders
+  // incorrectly support non-minimal tags.
+  EXPECT_FALSE(CertFromPEM(kHighTagNumber));
+}
+
+TEST(X509Test, Names) {
+  bssl::UniquePtr<EVP_PKEY> key = PrivateKeyFromPEM(kP256Key);
+  ASSERT_TRUE(key);
+  bssl::UniquePtr<X509> root =
+      MakeTestCert("Root", "Root", key.get(), /*is_ca=*/true);
+  ASSERT_TRUE(root);
+  ASSERT_TRUE(X509_sign(root.get(), key.get(), EVP_sha256()));
+
+  struct {
+    std::vector<std::pair<int, std::string>> cert_subject;
+    std::vector<std::string> cert_dns_names;
+    std::vector<std::string> cert_emails;
+    std::vector<std::string> valid_dns_names;
+    std::vector<std::string> invalid_dns_names;
+    std::vector<std::string> valid_emails;
+    std::vector<std::string> invalid_emails;
+    unsigned flags;
+  } kTests[] = {
+      // DNS names only match DNS names and do so case-insensitively.
+      {
+          /*cert_subject=*/{},
+          /*cert_dns_names=*/{"example.com", "WWW.EXAMPLE.COM"},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/
+          {"example.com", "EXAMPLE.COM", "www.example.com", "WWW.EXAMPLE.COM"},
+          /*invalid_dns_names=*/{"test.example.com", "example.org"},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/{"test@example.com", "example.com"},
+          /*flags=*/0,
+      },
+
+      // DNS wildcards match exactly one component.
+      {
+          /*cert_subject=*/{},
+          /*cert_dns_names=*/{"*.example.com", "*.EXAMPLE.ORG"},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/
+          {"www.example.com", "WWW.EXAMPLE.COM", "www.example.org",
+           "WWW.EXAMPLE.ORG"},
+          /*invalid_dns_names=*/{"example.com", "test.www.example.com"},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/{"test@example.com", "www.example.com"},
+          /*flags=*/0,
+      },
+
+      // DNS wildcards can be disabled.
+      // TODO(davidben): Can we remove this feature? Does anyone use it?
+      {
+          /*cert_subject=*/{},
+          /*cert_dns_names=*/{"example.com", "*.example.com"},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/{"example.com"},
+          /*invalid_dns_names=*/{"www.example.com"},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/{},
+          /*flags=*/X509_CHECK_FLAG_NO_WILDCARDS,
+      },
+
+      // Invalid DNS wildcards do not match.
+      {
+          /*cert_subject=*/{},
+          /*cert_dns_names=*/
+          {"a.*", "**.b.example", "*c.example", "d*.example", "e*e.example",
+           "*", ".", "..", "*."},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/{},
+          /*invalid_dns_names=*/
+          {"a.example", "test.b.example", "cc.example", "dd.example",
+           "eee.example", "f", "g."},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/{},
+          /*flags=*/0,
+      },
+
+      // IDNs match like any other DNS labels.
+      {
+          /*cert_subject=*/{},
+          /*cert_dns_names=*/
+          {"xn--rger-koa.a.example", "*.xn--rger-koa.b.example",
+           "www.xn--rger-koa.c.example"},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/
+          {"xn--rger-koa.a.example", "www.xn--rger-koa.b.example",
+           "www.xn--rger-koa.c.example"},
+          /*invalid_dns_names=*/
+          {"www.xn--rger-koa.a.example", "xn--rger-koa.b.example",
+           "www.xn--rger-koa.d.example"},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/{},
+          /*flags=*/0,
+      },
+
+      // For now, DNS names are also extracted out of the common name, but only
+      // there is no SAN list.
+      // TODO(https://crbug.com/boringssl/464): Remove this.
+      {
+          /*cert_subject=*/{{NID_commonName, "a.example"},
+                            {NID_commonName, "*.b.example"}},
+          /*cert_dns_names=*/{},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/
+          {"a.example", "A.EXAMPLE", "test.b.example", "TEST.B.EXAMPLE"},
+          /*invalid_dns_names=*/{},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/{},
+          /*flags=*/0,
+      },
+      {
+          /*cert_subject=*/{{NID_commonName, "a.example"},
+                            {NID_commonName, "*.b.example"}},
+          /*cert_dns_names=*/{"example.com"},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/{},
+          /*invalid_dns_names=*/
+          {"a.example", "A.EXAMPLE", "test.b.example", "TEST.B.EXAMPLE"},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/{},
+          /*flags=*/0,
+      },
+
+      // Other subject RDNs do not provide DNS names.
+      {
+          /*cert_subject=*/{{NID_organizationName, "example.com"}},
+          /*cert_dns_names=*/{},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/{},
+          /*invalid_dns_names=*/{"example.com"},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/{},
+          /*flags=*/0,
+      },
+
+      // Input DNS names cannot have wildcards.
+      {
+          /*cert_subject=*/{},
+          /*cert_dns_names=*/{"www.example.com"},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/{},
+          /*invalid_dns_names=*/{"*.example.com"},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/{},
+          /*flags=*/0,
+      },
+
+      // OpenSSL has some non-standard wildcard syntax for input DNS names. We
+      // do not support this.
+      {
+          /*cert_subject=*/{},
+          /*cert_dns_names=*/{"www.a.example", "*.b.test"},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/{},
+          /*invalid_dns_names=*/
+          {".www.a.example", ".www.b.test", ".a.example", ".b.test", ".example",
+           ".test"},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/{},
+          /*flags=*/0,
+      },
+
+      // Emails match case-sensitively before the '@' and case-insensitively
+      // after. They do not match DNS names.
+      {
+          /*cert_subject=*/{},
+          /*cert_dns_names=*/{},
+          /*cert_emails=*/{"test@a.example", "TEST@B.EXAMPLE"},
+          /*valid_dns_names=*/{},
+          /*invalid_dns_names=*/{"a.example", "b.example"},
+          /*valid_emails=*/
+          {"test@a.example", "test@A.EXAMPLE", "TEST@b.example",
+           "TEST@B.EXAMPLE"},
+          /*invalid_emails=*/
+          {"TEST@a.example", "test@B.EXAMPLE", "another-test@a.example",
+           "est@a.example"},
+          /*flags=*/0,
+      },
+
+      // Emails may also be found in the subject.
+      {
+          /*cert_subject=*/{{NID_pkcs9_emailAddress, "test@a.example"},
+                            {NID_pkcs9_emailAddress, "TEST@B.EXAMPLE"}},
+          /*cert_dns_names=*/{},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/{},
+          /*invalid_dns_names=*/{"a.example", "b.example"},
+          /*valid_emails=*/
+          {"test@a.example", "test@A.EXAMPLE", "TEST@b.example",
+           "TEST@B.EXAMPLE"},
+          /*invalid_emails=*/
+          {"TEST@a.example", "test@B.EXAMPLE", "another-test@a.example",
+           "est@a.example"},
+          /*flags=*/0,
+      },
+
+      // There are no email wildcard names.
+      {
+          /*cert_subject=*/{},
+          /*cert_dns_names=*/{},
+          /*cert_emails=*/{"test@*.a.example", "@b.example", "*@c.example"},
+          /*valid_dns_names=*/{},
+          /*invalid_dns_names=*/{},
+          /*valid_emails=*/{},
+          /*invalid_emails=*/
+          {"test@test.a.example", "test@b.example", "test@c.example"},
+          /*flags=*/0,
+      },
+
+      // Unrelated RDNs can be skipped when looking in the subject.
+      {
+          /*cert_subject=*/{{NID_organizationName, "Acme Corporation"},
+                            {NID_commonName, "a.example"},
+                            {NID_pkcs9_emailAddress, "test@b.example"},
+                            {NID_countryName, "US"}},
+          /*cert_dns_names=*/{},
+          /*cert_emails=*/{},
+          /*valid_dns_names=*/{"a.example"},
+          /*invalid_dns_names=*/{},
+          /*valid_emails=*/{"test@b.example"},
+          /*invalid_emails=*/{},
+          /*flags=*/0,
+      },
+  };
+
+  size_t i = 0;
+  for (const auto &t : kTests) {
+    SCOPED_TRACE(i++);
+
+    // Issue a test certificate.
+    bssl::UniquePtr<X509> cert =
+        MakeTestCert("Root", "Leaf", key.get(), /*is_ca=*/false);
+    ASSERT_TRUE(cert);
+    if (!t.cert_subject.empty()) {
+      bssl::UniquePtr<X509_NAME> subject(X509_NAME_new());
+      ASSERT_TRUE(subject);
+      for (const auto &entry : t.cert_subject) {
+        ASSERT_TRUE(X509_NAME_add_entry_by_NID(
+            subject.get(), entry.first, MBSTRING_ASC,
+            reinterpret_cast<const unsigned char *>(entry.second.data()),
+            entry.second.size(), /*loc=*/-1, /*set=*/0));
+      }
+      ASSERT_TRUE(X509_set_subject_name(cert.get(), subject.get()));
+    }
+    bssl::UniquePtr<GENERAL_NAMES> sans(sk_GENERAL_NAME_new_null());
+    ASSERT_TRUE(sans);
+    for (const auto &dns : t.cert_dns_names) {
+      bssl::UniquePtr<GENERAL_NAME> name(GENERAL_NAME_new());
+      ASSERT_TRUE(name);
+      name->type = GEN_DNS;
+      name->d.dNSName = ASN1_IA5STRING_new();
+      ASSERT_TRUE(name->d.dNSName);
+      ASSERT_TRUE(ASN1_STRING_set(name->d.dNSName, dns.data(), dns.size()));
+      ASSERT_TRUE(bssl::PushToStack(sans.get(), std::move(name)));
+    }
+    for (const auto &email : t.cert_emails) {
+      bssl::UniquePtr<GENERAL_NAME> name(GENERAL_NAME_new());
+      ASSERT_TRUE(name);
+      name->type = GEN_EMAIL;
+      name->d.rfc822Name = ASN1_IA5STRING_new();
+      ASSERT_TRUE(name->d.rfc822Name);
+      ASSERT_TRUE(
+          ASN1_STRING_set(name->d.rfc822Name, email.data(), email.size()));
+      ASSERT_TRUE(bssl::PushToStack(sans.get(), std::move(name)));
+    }
+    if (sk_GENERAL_NAME_num(sans.get()) != 0) {
+      ASSERT_TRUE(X509_add1_ext_i2d(cert.get(), NID_subject_alt_name,
+                                    sans.get(), /*crit=*/0, /*flags=*/0));
+    }
+    ASSERT_TRUE(X509_sign(cert.get(), key.get(), EVP_sha256()));
+
+    for (const auto &dns : t.valid_dns_names) {
+      SCOPED_TRACE(dns);
+      EXPECT_EQ(1, X509_check_host(cert.get(), dns.data(), dns.size(), t.flags,
+                                   /*peername=*/nullptr));
+      EXPECT_EQ(X509_V_OK,
+                Verify(cert.get(), {root.get()}, /*intermediates=*/{},
+                       /*crls=*/{}, /*flags=*/0, [&](X509_VERIFY_PARAM *param) {
+                         ASSERT_TRUE(X509_VERIFY_PARAM_set1_host(
+                             param, dns.data(), dns.size()));
+                         X509_VERIFY_PARAM_set_hostflags(param, t.flags);
+                       }));
+    }
+
+    for (const auto &dns : t.invalid_dns_names) {
+      SCOPED_TRACE(dns);
+      EXPECT_EQ(0, X509_check_host(cert.get(), dns.data(), dns.size(), t.flags,
+                                   /*peername=*/nullptr));
+      EXPECT_EQ(X509_V_ERR_HOSTNAME_MISMATCH,
+                Verify(cert.get(), {root.get()}, /*intermediates=*/{},
+                       /*crls=*/{}, /*flags=*/0, [&](X509_VERIFY_PARAM *param) {
+                         ASSERT_TRUE(X509_VERIFY_PARAM_set1_host(
+                             param, dns.data(), dns.size()));
+                         X509_VERIFY_PARAM_set_hostflags(param, t.flags);
+                       }));
+    }
+
+    for (const auto &email : t.valid_emails) {
+      SCOPED_TRACE(email);
+      EXPECT_EQ(
+          1, X509_check_email(cert.get(), email.data(), email.size(), t.flags));
+      EXPECT_EQ(X509_V_OK,
+                Verify(cert.get(), {root.get()}, /*intermediates=*/{},
+                       /*crls=*/{}, /*flags=*/0, [&](X509_VERIFY_PARAM *param) {
+                         ASSERT_TRUE(X509_VERIFY_PARAM_set1_email(
+                             param, email.data(), email.size()));
+                         X509_VERIFY_PARAM_set_hostflags(param, t.flags);
+                       }));
+    }
+
+    for (const auto &email : t.invalid_emails) {
+      SCOPED_TRACE(email);
+      EXPECT_EQ(
+          0, X509_check_email(cert.get(), email.data(), email.size(), t.flags));
+      EXPECT_EQ(X509_V_ERR_EMAIL_MISMATCH,
+                Verify(cert.get(), {root.get()}, /*intermediates=*/{},
+                       /*crls=*/{}, /*flags=*/0, [&](X509_VERIFY_PARAM *param) {
+                         ASSERT_TRUE(X509_VERIFY_PARAM_set1_email(
+                             param, email.data(), email.size()));
+                         X509_VERIFY_PARAM_set_hostflags(param, t.flags);
+                       }));
+    }
+  }
+}
+
+TEST(X509Test, AddDuplicates) {
+  bssl::UniquePtr<X509_STORE> store(X509_STORE_new());
+  bssl::UniquePtr<X509> a(CertFromPEM(kCrossSigningRootPEM));
+  bssl::UniquePtr<X509> b(CertFromPEM(kRootCAPEM));
+
+  ASSERT_TRUE(store);
+  ASSERT_TRUE(a);
+  ASSERT_TRUE(b);
+
+  EXPECT_TRUE(X509_STORE_add_cert(store.get(), a.get()));
+  EXPECT_TRUE(X509_STORE_add_cert(store.get(), b.get()));
+  EXPECT_TRUE(X509_STORE_add_cert(store.get(), a.get()));
+  EXPECT_TRUE(X509_STORE_add_cert(store.get(), b.get()));
+  EXPECT_TRUE(X509_STORE_add_cert(store.get(), a.get()));
+  EXPECT_TRUE(X509_STORE_add_cert(store.get(), b.get()));
+
+  EXPECT_EQ(sk_X509_OBJECT_num(X509_STORE_get0_objects(store.get())), 2u);
+}
+
+TEST(X509Test, BytesToHex) {
+  struct {
+    std::vector<uint8_t> bytes;
+    const char *hex;
+  } kTests[] = {
+      {{}, ""},
+      {{0x00}, "00"},
+      {{0x00, 0x11, 0x22}, "00:11:22"},
+      {{0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef},
+       "01:23:45:67:89:AB:CD:EF"},
+  };
+  for (const auto &t : kTests) {
+    SCOPED_TRACE(Bytes(t.bytes));
+    bssl::UniquePtr<char> hex(
+        x509v3_bytes_to_hex(t.bytes.data(), t.bytes.size()));
+    ASSERT_TRUE(hex);
+    EXPECT_STREQ(hex.get(), t.hex);
+  }
 }
