@@ -166,6 +166,10 @@
 
 BSSL_NAMESPACE_BEGIN
 
+static_assert(SSL3_RT_MAX_ENCRYPTED_OVERHEAD >=
+                  SSL3_RT_SEND_MAX_ENCRYPTED_OVERHEAD,
+              "max overheads are inconsistent");
+
 // |SSL_R_UNKNOWN_PROTOCOL| is no longer emitted, but continue to define it
 // to avoid downstream churn.
 OPENSSL_DECLARE_ERROR_REASON(SSL, UNKNOWN_PROTOCOL)
@@ -683,7 +687,7 @@ SSL_CONFIG::SSL_CONFIG(SSL *ssl_arg)
       signed_cert_timestamps_enabled(false),
       ocsp_stapling_enabled(false),
       channel_id_enabled(false),
-      enforce_rsa_key_usage(false),
+      enforce_rsa_key_usage(true),
       retain_only_sha256_of_client_certs(false),
       handoff(false),
       shed_handshake_config(false),
@@ -1058,6 +1062,7 @@ int SSL_write(SSL *ssl, const void *buf, int num) {
   }
 
   int ret = 0;
+  size_t bytes_written = 0;
   bool needs_handshake = false;
   do {
     // If necessary, complete the handshake implicitly.
@@ -1072,10 +1077,16 @@ int SSL_write(SSL *ssl, const void *buf, int num) {
       }
     }
 
-    ret = ssl->method->write_app_data(ssl, &needs_handshake,
-                                      (const uint8_t *)buf, num);
+    if (num < 0) {
+      OPENSSL_PUT_ERROR(SSL, SSL_R_BAD_LENGTH);
+      return -1;
+    }
+    ret = ssl->method->write_app_data(
+        ssl, &needs_handshake, &bytes_written,
+        MakeConstSpan(static_cast<const uint8_t *>(buf),
+                      static_cast<size_t>(num)));
   } while (needs_handshake);
-  return ret;
+  return ret <= 0 ? ret : static_cast<int>(bytes_written);
 }
 
 int SSL_key_update(SSL *ssl, int request_type) {
@@ -1239,7 +1250,7 @@ void SSL_reset_early_data_reject(SSL *ssl) {
   // Discard any unfinished writes from the perspective of |SSL_write|'s
   // retry. The handshake will transparently flush out the pending record
   // (discarded by the server) to keep the framing correct.
-  ssl->s3->wpend_pending = false;
+  ssl->s3->pending_write = {};
 }
 
 enum ssl_early_data_reason_t SSL_get_early_data_reason(const SSL *ssl) {
@@ -1308,7 +1319,7 @@ int SSL_get_error(const SSL *ssl, int ret_code) {
   }
 
   if (ret_code == 0) {
-    if (ssl->s3->read_shutdown == ssl_shutdown_close_notify) {
+    if (ssl->s3->rwstate == SSL_ERROR_ZERO_RETURN) {
       return SSL_ERROR_ZERO_RETURN;
     }
     // An EOF was observed which violates the protocol, and the underlying
@@ -1938,9 +1949,23 @@ int SSL_set1_curves_list(SSL *ssl, const char *curves) {
   return tls1_set_curves_list(&ssl->config->supported_group_list, curves);
 }
 
+int SSL_CTX_set1_groups(SSL_CTX *ctx, const int *groups, size_t groups_len) {
+  return SSL_CTX_set1_curves(ctx, groups, groups_len);
+}
+
+int SSL_set1_groups(SSL *ssl, const int *groups, size_t groups_len) {
+  return SSL_set1_curves(ssl, groups, groups_len);
+}
+
+int SSL_CTX_set1_groups_list(SSL_CTX *ctx, const char *groups) {
+  return SSL_CTX_set1_curves_list(ctx, groups);
+}
+
+int SSL_set1_groups_list(SSL *ssl, const char *groups) {
+  return SSL_set1_curves_list(ssl, groups);
+}
+
 uint16_t SSL_get_curve_id(const SSL *ssl) {
-  // TODO(davidben): This checks the wrong session if there is a renegotiation
-  // in progress.
   SSL_SESSION *session = SSL_get_session(ssl);
   if (session == NULL) {
     return 0;
@@ -2567,7 +2592,13 @@ void *SSL_CTX_get_ex_data(const SSL_CTX *ctx, int idx) {
   return CRYPTO_get_ex_data(&ctx->ex_data, idx);
 }
 
-int SSL_want(const SSL *ssl) { return ssl->s3->rwstate; }
+int SSL_want(const SSL *ssl) {
+  // Historically, OpenSSL did not track |SSL_ERROR_ZERO_RETURN| as an |rwstate|
+  // value. We do, but map it back to |SSL_ERROR_NONE| to preserve the original
+  // behavior.
+  return ssl->s3->rwstate == SSL_ERROR_ZERO_RETURN ? SSL_ERROR_NONE
+                                                   : ssl->s3->rwstate;
+}
 
 void SSL_CTX_set_tmp_rsa_callback(SSL_CTX *ctx,
                                   RSA *(*cb)(SSL *ssl, int is_export,
@@ -2791,35 +2822,25 @@ int SSL_get_ivs(const SSL *ssl, const uint8_t **out_read_iv,
   return 1;
 }
 
-static uint64_t be_to_u64(const uint8_t in[8]) {
-  return (((uint64_t)in[0]) << 56) | (((uint64_t)in[1]) << 48) |
-         (((uint64_t)in[2]) << 40) | (((uint64_t)in[3]) << 32) |
-         (((uint64_t)in[4]) << 24) | (((uint64_t)in[5]) << 16) |
-         (((uint64_t)in[6]) << 8) | ((uint64_t)in[7]);
-}
-
 uint64_t SSL_get_read_sequence(const SSL *ssl) {
-  // TODO(davidben): Internally represent sequence numbers as uint64_t.
   if (SSL_is_dtls(ssl)) {
     // max_seq_num already includes the epoch.
     assert(ssl->d1->r_epoch == (ssl->d1->bitmap.max_seq_num >> 48));
     return ssl->d1->bitmap.max_seq_num;
   }
-  return be_to_u64(ssl->s3->read_sequence);
+  return ssl->s3->read_sequence;
 }
 
 uint64_t SSL_get_write_sequence(const SSL *ssl) {
-  uint64_t ret = be_to_u64(ssl->s3->write_sequence);
+  uint64_t ret = ssl->s3->write_sequence;
   if (SSL_is_dtls(ssl)) {
     assert((ret >> 48) == 0);
-    ret |= ((uint64_t)ssl->d1->w_epoch) << 48;
+    ret |= uint64_t{ssl->d1->w_epoch} << 48;
   }
   return ret;
 }
 
 uint16_t SSL_get_peer_signature_algorithm(const SSL *ssl) {
-  // TODO(davidben): This checks the wrong session if there is a renegotiation
-  // in progress.
   SSL_SESSION *session = SSL_get_session(ssl);
   if (session == NULL) {
     return 0;
@@ -3036,6 +3057,8 @@ int SSL_CTX_set_num_tickets(SSL_CTX *ctx, size_t num_tickets) {
   ctx->num_tickets = static_cast<uint8_t>(num_tickets);
   return 1;
 }
+
+size_t SSL_CTX_get_num_tickets(const SSL_CTX *ctx) { return ctx->num_tickets; }
 
 int SSL_set_tlsext_status_type(SSL *ssl, int type) {
   if (!ssl->config) {
